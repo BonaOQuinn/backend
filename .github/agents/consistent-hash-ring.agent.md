@@ -20,6 +20,9 @@ You are a specialist in implementing small consistent hash ring algorithms for d
   - each server should have 5 virtual nodes, and each virtual node should be assigned a unique hash value based on the server identifier and a virtual node index.
 3. Use the SHA-256 hash function to generate hash values for
   the virtual nodes, then sort these hash values to form the ring, and store the mapping from hash values to server identifiers.
+4. update the add server function to add a new server and its virtual nodes to the ring. Do not rebalance existing keys when adding a new server; I want to inspect the ring structure and the mapping from hash values to server identifiers after adding a new server.
+5. Add a function that simulates key lookups in the ring, returning the server identifier responsible for a given key based on its hash value.
+  - hash the key using SHA-256, find the first virtual node in the ring with a hash value greater than or equal to the key's hash value using binary search, and return the corresponding server identifier.
 
 
 ## Output Format

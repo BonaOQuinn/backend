@@ -1,3 +1,4 @@
+import bisect
 import hashlib
 from dataclasses import dataclass
 
@@ -21,9 +22,11 @@ class ConsistentHashRing:
         self.servers = list(servers)
         self.virtual_nodes_per_server = virtual_nodes_per_server
         self.ring = self._build_ring()
+        self.hash_to_server = {entry["hash"]: entry["server_id"] for entry in self.ring}
+        self.server_by_id = {server.server_id: server for server in self.servers}
 
     def _hash(self, value: str) -> int:
-        return int(hashlib.sha1(value.encode("utf-8")).hexdigest(), 16)
+        return int(hashlib.sha256(value.encode("utf-8")).hexdigest(), 16)
 
     def _build_ring(self):
         ring = []
@@ -39,17 +42,22 @@ class ConsistentHashRing:
                 })
         return sorted(ring, key=lambda item: item["hash"])
 
-    def get_server(self, key: str) -> Server:
+    def lookup_key(self, key: str) -> str:
         if not self.ring:
             raise ValueError("No servers available in the ring.")
 
         target_hash = self._hash(key)
+        ring_hashes = [entry["hash"] for entry in self.ring]
+        idx = bisect.bisect_left(ring_hashes, target_hash)
 
-        for entry in self.ring:
-            if target_hash <= entry["hash"]:
-                return entry["server"]
+        if idx == len(ring_hashes):
+            idx = 0
 
-        return self.ring[0]["server"]
+        return self.ring[idx]["server_id"]
+
+    def get_server(self, key: str) -> Server:
+        server_id = self.lookup_key(key)
+        return self.server_by_id[server_id]
 
     def visualize_ring(self, limit: int = None):
         entries = self.ring if limit is None else self.ring[:limit]
@@ -67,13 +75,31 @@ class ConsistentHashRing:
         return counts
 
     def add_server(self, server: Server):
-        if server not in self.servers:
-            self.servers.append(server)
-            self.ring = self._build_ring()
+        if server in self.servers:
+            return self.ring
+
+        self.servers.append(server)
+        for vnode_id in range(self.virtual_nodes_per_server):
+            virtual_name = f"{server.server_id}:{vnode_id}"
+            hash_value = self._hash(virtual_name)
+            self.ring.append({
+                "hash": hash_value,
+                "server_id": server.server_id,
+                "server": server,
+                "vnode_id": vnode_id,
+            })
+
+        # Intentionally do not rebalance existing keys here; this is just the ring update.
+        self.ring.sort(key=lambda item: item["hash"])
+        self.hash_to_server = {entry["hash"]: entry["server_id"] for entry in self.ring}
+        self.server_by_id = {server.server_id: server for server in self.servers}
+        return self.ring
 
     def remove_server(self, server_id: str):
         self.servers = [server for server in self.servers if server.server_id != server_id]
         self.ring = self._build_ring()
+        self.hash_to_server = {entry["hash"]: entry["server_id"] for entry in self.ring}
+        self.server_by_id = {server.server_id: server for server in self.servers}
 
     def describe_ownership(self):
         entries = []
@@ -108,27 +134,31 @@ if __name__ == "__main__":
         "profile:alice",
     ]
 
-    print("Servers:")
+    print("Initial servers:")
     for server in servers:
         print(f"- {server.server_id} -> {server.host}:{server.port}")
 
-    print("\nVirtual node counts per server:")
+    print("\nBefore adding a server:")
     for server_id, count in ring.vnode_counts().items():
         print(f"- {server_id}: {count} virtual nodes")
 
+    new_server = Server(server_id="server-4", host="cache-d", port=8004)
+    ring.add_server(new_server)
+
+    print("\nAfter adding server-4:")
+    for server_id, count in ring.vnode_counts().items():
+        print(f"- {server_id}: {count} virtual nodes")
+
+    print("\nHash-to-server mapping snapshot:")
+    for hash_value, server_id in list(ring.hash_to_server.items())[:10]:
+        print(f"{hash_value}: {server_id}")
+
     print("\nRing visualization (sorted by hash):")
-    for index, entry in enumerate(ring.ring[:12]):
+    for index, entry in enumerate(ring.ring):
         print(f"{index:02d}: {entry['server_id']} vnode={entry['vnode_id']} hash={entry['hash']}")
 
-    print("\nOwnership summary:")
-    for index, entry in enumerate(ring.ring[:12]):
-        previous_hash = ring.ring[index - 1]["hash"] if index > 0 else ring.ring[-1]["hash"]
-        print(f"slot {index:02d}: {entry['server_id']} handles hashes > {previous_hash} and <= {entry['hash']}")
-
-    print("\nKey assignments:")
+    print("\nKey assignments after ring update:")
     for key in sample_keys:
-        server = ring.get_server(key)
-        print(f"{key} -> {server.server_id} ({server.host}:{server.port})")
-
-    print("\nCompact ring preview:")
-    print(ring.visualize_ring(limit=12))
+        server_id = ring.lookup_key(key)
+        server = ring.server_by_id[server_id]
+        print(f"{key} -> {server_id} ({server.host}:{server.port})")
